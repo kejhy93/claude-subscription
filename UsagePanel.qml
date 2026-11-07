@@ -27,15 +27,20 @@ Panel {
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
-  function refresh() {
+  // Background polling is done by the claude-subscription-fetch systemd timer;
+  // the panel reads its local snapshot. Only an explicit refresh hits the API.
+  function runFetch(live) {
     if (loading) return
     loading = true
     errorText = ""
-    fetchProc.command = ["python3", Qt.resolvedUrl("fetch.py").toString().replace("file://", "")]
+    var script = Qt.resolvedUrl("fetch.py").toString().replace("file://", "")
+    fetchProc.command = live ? ["python3", script] : ["python3", script, "--cached"]
     fetchProc.running = true
   }
+  function reload() { runFetch(false) }
+  function refresh() { runFetch(true) }
 
-  function open() { root.controller.show(); root.refresh() }
+  function open() { root.controller.show(); root.reload() }
   function openFromHotkey() { open() }
   function close() { root.controller.hide() }
   function toggle() { if (root.opened) close(); else open() }
@@ -91,7 +96,8 @@ Panel {
     onExited: function(exitCode) {
       root.loading = false
       if (exitCode !== 0 && root.errorText === "") root.errorText = "Could not read Claude Code usage (exit " + exitCode + ")"
-      if (root.errorText !== "") root.statusText = root.errorText
+      if (root.errorText !== "" && root.fiveHour === null && root.sevenDay === null)
+        root.statusText = root.errorText
     }
   }
 
@@ -102,7 +108,7 @@ Panel {
       statusText = errorText
       return
     }
-    if (!data || data.error) {
+    if (!data || (!data.five_hour && !data.seven_day)) {
       errorText = data && data.error ? String(data.error).slice(0, 180) : strings.t("panel.noUsage")
       statusText = errorText
       return
@@ -114,11 +120,16 @@ Panel {
     lastUpdated = isFinite(stamp) && stamp > 0
       ? Qt.formatDateTime(new Date(stamp * 1000), Qt.locale(Commons.I18n.formatLocale), "ddd HH:mm")
       : ""
-    statusText = lastUpdated !== "" ? strings.t("panel.updated").arg(lastUpdated) : strings.t("panel.latest")
-    errorText = ""
+    if (data.stale) {
+      statusText = strings.t("panel.stale")
+      errorText = data.error ? String(data.error).slice(0, 180) : strings.t("panel.staleHelp")
+    } else {
+      statusText = lastUpdated !== "" ? strings.t("panel.updated").arg(lastUpdated) : strings.t("panel.latest")
+      errorText = ""
+    }
   }
 
-  onOpenedChanged: if (opened) root.refresh()
+  onOpenedChanged: if (opened) root.reload()
 
   Timer {
     interval: 60000
@@ -126,7 +137,7 @@ Panel {
     running: root.opened
     onTriggered: {
       root.clockTick = Date.now()
-      root.refresh()
+      root.reload()
     }
   }
 

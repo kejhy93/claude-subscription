@@ -1,27 +1,24 @@
 # Claude Subscription (local Omarchy widget)
 
-A native Omarchy popup for the latest Claude Code subscription usage snapshot: the rolling 5-hour window and 7-day weekly window, including percentage remaining, countdown to reset, the reset time, and detected subscription type. The menu action opens it from Omarchy's main menu; the optional bar widget mirrors OpenRouter Spending.
+A native Omarchy popup for Claude subscription usage: the rolling 5-hour window and 7-day weekly window, including percentage remaining, countdown to reset, reset time, and detected subscription type. The menu action opens it from Omarchy's main menu; the optional bar widget mirrors OpenRouter Spending.
 
 ## Install on a new machine
 
 The repo is private, so the machine needs GitHub access over SSH first (`gh auth login --git-protocol ssh` can generate and upload a key).
 
 ```sh
-# 1. Download and enable the plugin (lands in ~/.config/omarchy/plugins/claude.subscription)
+# Download and enable the plugin (lands in ~/.config/omarchy/plugins/claude.subscription)
 omarchy plugin add git@github.com:kejhy93/claude-subscription.git --enable
-
-# 2. Point Claude Code's status line at the plugin's capture script
-#    (keeps all other settings; replaces any existing statusLine)
-mkdir -p ~/.claude
-[ -f ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
-cp ~/.claude/settings.json ~/.claude/settings.json.bak
-jq --arg cmd 'python3 "$HOME/.config/omarchy/plugins/claude.subscription/statusline.py"' \
-  '.statusLine = {type: "command", command: $cmd, refreshInterval: 300}' \
-  ~/.claude/settings.json > ~/.claude/settings.json.tmp \
-  && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 ```
 
-The widget shows data once Claude Code has run its status line at least once: start a `claude` session and send a message. Then click the widget in the bar, or run `omarchy-shell claude.subscription open`.
+Then enable the background refresh, a systemd user timer that calls the usage API every 10 minutes and stores the result locally:
+
+```sh
+~/.config/omarchy/plugins/claude.subscription/install-timer.sh            # enable
+~/.config/omarchy/plugins/claude.subscription/install-timer.sh --uninstall  # disable
+```
+
+The widget itself makes no network requests on load, on open, or from its timer: it reads the local snapshot written by the timer (and by the optional status line). The manual refresh button, a middle-click, or `omarchy-shell claude.subscription refresh` requests a live API read. API requests are rate-limited locally to no more than one every five minutes, with backoff after HTTP 429. A snapshot older than 25 minutes is marked stale. Open the widget in the bar or run `omarchy-shell claude.subscription open`.
 
 ### Updating
 
@@ -29,20 +26,22 @@ The widget shows data once Claude Code has run its status line at least once: st
 omarchy plugin update claude.subscription
 ```
 
-To change the plugin, edit it in `~/.config/omarchy/plugins/claude.subscription/` (it hot-reloads), then `git commit` and `git push` from there.
+To change the plugin, edit it in `~/.config/omarchy/plugins/claude-subscription/` (it hot-reloads), then `git commit` and `git push` from there.
 
 ## Data source and freshness
 
-Claude Code's documented `statusLine` JSON includes `rate_limits.five_hour` and `rate_limits.seven_day` with `used_percentage` and `resets_at`. `statusline.py` stores only those numeric values and a timestamp in `~/.local/state/claude-subscription/usage.json`, with restrictive local permissions. The popup reads that snapshot; it does not poll Anthropic or use private APIs. Claude Code refreshes the snapshot when it runs the status line, typically after assistant responses and at limit reset events. It can therefore be stale when Claude Code is not active. The usage limits are shared across Claude and Claude Code according to Anthropic's plan documentation.
+`fetch.py` calls `https://api.anthropic.com/api/oauth/usage` using the existing Claude Code OAuth access token from `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR/.credentials.json`). This endpoint is used by Claude Code but is not a publicly documented Anthropic API; Anthropic can change it without notice. The helper uses HTTPS with redirects disabled, and enforces a five-minute minimum interval plus a persisted backoff after HTTP 429 responses. No API key or token is added to widget settings. It stores only the 5-hour/7-day percentages, reset epochs, and successful fetch time in `~/.local/state/claude-subscription/usage.json`, with directory mode `0700` and file mode `0600`. On refresh failure, the UI keeps the last successful snapshot and marks it stale. It does not store OAuth credentials or transmit prompt/session content.
+
+The optional `statusline.py` integration remains as a local fallback: Claude Code's documented `statusLine` JSON can update the same snapshot after assistant responses if you choose to configure it. Periodic API reads come only from the `claude-subscription-fetch.timer` systemd user timer (every 10 minutes, see `systemctl --user list-timers`); the widget reads the stored snapshot. The widget does not need the status-line integration for live API reads.
 
 ## Install behavior
 
-The plugin depends on Claude Code's supported status line in `~/.claude/settings.json`, which you set up by hand (step 2 above); the plugin does not write it. This adds a small `Claude · 5h: … · 7d: …` line to interactive Claude Code sessions and provides the data the menu reads. Existing settings and hooks are preserved. No OAuth token or prompt/session content is read or transmitted; only the subscription type field is read locally from Claude Code's mode-0600 credentials file.
+The status line integration is optional for live API reads. If configured, it adds a small `Claude · 5h: … · 7d: …` line to interactive Claude Code sessions and provides a local fallback snapshot. The OAuth access token is read from the protected local Claude Code credentials file and sent only to Anthropic's fixed HTTPS usage endpoint. The subscription type is read locally.
 
 ## Controls
 
 - Left-click bar icon: open/close popup
-- Middle-click or popup refresh: reread the local snapshot
+- Middle-click or popup refresh: request a live API refresh
 - IPC: `omarchy-shell claude.subscription refresh|toggle|open`
 - Main menu search: `Claude Subscription`
 - Disable bar widget: `omarchy plugin disable claude.subscription`
@@ -51,7 +50,8 @@ The plugin depends on Claude Code's supported status line in `~/.claude/settings
 
 - `manifest.json` — plugin registration
 - `BarWidget.qml` / `UsagePanel.qml` — bar button and popup
-- `statusline.py` — capture Claude Code's documented statusline JSON
-- `fetch.py` — validate and read the local snapshot
+- `statusline.py` — optional local fallback from Claude Code's documented status-line JSON
+- `fetch.py` — fetch, validate, persist, and return a local usage snapshot (`--cached` reads the snapshot without network)
+- `install-timer.sh` — install/remove the 10-minute background refresh timer
 
-Privacy: the cache contains only usage percentages, reset epochs, and an update timestamp. No network requests are made.
+Privacy: the cache contains only usage percentages, reset epochs, and an update timestamp. Each refresh makes one HTTPS request to Anthropic's undocumented OAuth usage endpoint. The status-line fallback performs no network requests.
