@@ -4,7 +4,7 @@ A native Omarchy popup for the latest Claude Code subscription usage snapshot: t
 
 ## Install on a new machine
 
-The repo is private, so the machine needs GitHub access over SSH first (`gh auth login` can generate and upload a key).
+The repo is private, so the machine needs GitHub access over SSH first (`gh auth login --git-protocol ssh` can generate and upload a key).
 
 ```sh
 # 1. Download and enable the plugin (lands in ~/.config/omarchy/plugins/claude.subscription)
@@ -15,9 +15,10 @@ omarchy plugin add git@github.com:kejhy93/claude-subscription.git --enable
 mkdir -p ~/.claude
 [ -f ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
 cp ~/.claude/settings.json ~/.claude/settings.json.bak
-jq --arg cmd "python3 $HOME/.config/omarchy/plugins/claude.subscription/statusline.py" \
+jq --arg cmd 'python3 "$HOME/.config/omarchy/plugins/claude.subscription/statusline.py"' \
   '.statusLine = {type: "command", command: $cmd, refreshInterval: 300}' \
-  ~/.claude/settings.json.bak > ~/.claude/settings.json
+  ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+  && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 ```
 
 The widget shows data once Claude Code has run its status line at least once: start a `claude` session and send a message. Then click the widget in the bar, or run `omarchy-shell claude.subscription open`.
