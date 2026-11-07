@@ -21,21 +21,31 @@ Panel {
   property var fiveHour: null
   property var sevenDay: null
   property bool loading: false
+  property bool pendingLive: false
   property bool popoutSwitchClosing: false
   property double clockTick: Date.now()
   readonly property int maxPanelHeight: popup.screen ? Math.max(Style.space(280), popup.screen.height - Style.gapsOut * 4) : Style.space(560)
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
-  function refresh() {
-    if (loading) return
+  // Background polling is done by the claude-subscription-fetch systemd timer;
+  // the panel reads its local snapshot. Only an explicit refresh hits the API.
+  function runFetch(live) {
+    if (loading) {
+      // Don't drop a manual refresh that arrives during a cached read.
+      if (live) pendingLive = true
+      return
+    }
     loading = true
     errorText = ""
-    fetchProc.command = ["python3", Qt.resolvedUrl("fetch.py").toString().replace("file://", "")]
+    var script = Qt.resolvedUrl("fetch.py").toString().replace("file://", "")
+    fetchProc.command = live ? ["python3", script, "--live"] : ["python3", script]
     fetchProc.running = true
   }
+  function reload() { runFetch(false) }
+  function refresh() { runFetch(true) }
 
-  function open() { root.controller.show(); root.refresh() }
+  function open() { root.controller.show(); root.reload() }
   function openFromHotkey() { open() }
   function close() { root.controller.hide() }
   function toggle() { if (root.opened) close(); else open() }
@@ -91,7 +101,12 @@ Panel {
     onExited: function(exitCode) {
       root.loading = false
       if (exitCode !== 0 && root.errorText === "") root.errorText = "Could not read Claude Code usage (exit " + exitCode + ")"
-      if (root.errorText !== "") root.statusText = root.errorText
+      if (root.errorText !== "" && root.fiveHour === null && root.sevenDay === null)
+        root.statusText = root.errorText
+      if (root.pendingLive) {
+        root.pendingLive = false
+        Qt.callLater(root.refresh)
+      }
     }
   }
 
@@ -102,7 +117,7 @@ Panel {
       statusText = errorText
       return
     }
-    if (!data || data.error) {
+    if (!data || (!data.five_hour && !data.seven_day)) {
       errorText = data && data.error ? String(data.error).slice(0, 180) : strings.t("panel.noUsage")
       statusText = errorText
       return
@@ -114,11 +129,16 @@ Panel {
     lastUpdated = isFinite(stamp) && stamp > 0
       ? Qt.formatDateTime(new Date(stamp * 1000), Qt.locale(Commons.I18n.formatLocale), "ddd HH:mm")
       : ""
-    statusText = lastUpdated !== "" ? strings.t("panel.updated").arg(lastUpdated) : strings.t("panel.latest")
-    errorText = ""
+    if (data.stale) {
+      statusText = strings.t("panel.stale")
+      errorText = data.error ? String(data.error).slice(0, 180) : strings.t("panel.staleHelp")
+    } else {
+      statusText = lastUpdated !== "" ? strings.t("panel.updated").arg(lastUpdated) : strings.t("panel.latest")
+      errorText = ""
+    }
   }
 
-  onOpenedChanged: if (opened) root.refresh()
+  onOpenedChanged: if (opened) root.reload()
 
   Timer {
     interval: 60000
@@ -126,7 +146,7 @@ Panel {
     running: root.opened
     onTriggered: {
       root.clockTick = Date.now()
-      root.refresh()
+      root.reload()
     }
   }
 

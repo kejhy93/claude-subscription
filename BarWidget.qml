@@ -34,7 +34,7 @@ BarWidget {
     onLoaded: {
       root.injectPanel()
       Qt.callLater(root.injectPanel)
-      item.refresh()
+      item.reload()
     }
   }
 
