@@ -1,0 +1,9 @@
+# Code owners for this repository.
+# Owners are automatically requested for review on pull requests.
+# Later rules take precedence over earlier ones.
+
+# Default owner for everything
+*                     @kejhy93
+
+# Protect ownership rules themselves
+/.github/CODEOWNERS   @kejhy93
