@@ -26,11 +26,11 @@ The widget itself makes no network requests on load, on open, or from its timer:
 omarchy plugin update claude.subscription
 ```
 
-To change the plugin, edit it in `~/.config/omarchy/plugins/claude-subscription/` (it hot-reloads), then `git commit` and `git push` from there.
+To change the plugin, edit it in `~/.config/omarchy/plugins/claude.subscription/` (it hot-reloads), then `git commit` and `git push` from there.
 
 ## Data source and freshness
 
-`fetch.py` calls `https://api.anthropic.com/api/oauth/usage` using the existing Claude Code OAuth access token from `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR/.credentials.json`). This endpoint is used by Claude Code but is not a publicly documented Anthropic API; Anthropic can change it without notice. The helper uses HTTPS with redirects disabled, and enforces a five-minute minimum interval plus a persisted backoff after HTTP 429 responses. No API key or token is added to widget settings. It stores only the 5-hour/7-day percentages, reset epochs, and successful fetch time in `~/.local/state/claude-subscription/usage.json`, with directory mode `0700` and file mode `0600`. On refresh failure, the UI keeps the last successful snapshot and marks it stale. It does not store OAuth credentials or transmit prompt/session content.
+`fetch.py` calls `https://api.anthropic.com/api/oauth/usage` using the existing Claude Code OAuth access token from `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR/.credentials.json`). This endpoint is used by Claude Code but is not a publicly documented Anthropic API; Anthropic can change it without notice. The helper uses HTTPS with redirects disabled, and enforces a five-minute minimum interval plus a persisted backoff after HTTP 429 responses. No API key or token is added to widget settings. It stores only the 5-hour/7-day percentages, reset epochs, and successful fetch time in `~/.local/state/claude-subscription/usage.json`, with directory mode `0700` and file mode `0600`. On refresh failure, the UI keeps the last successful snapshot and marks it stale. It does not store OAuth credentials or transmit prompt/session content. It never renews or rewrites the OAuth token (Claude Code owns that); if the saved token has expired, refreshes pause until Claude Code renews it.
 
 The optional `statusline.py` integration remains as a local fallback: Claude Code's documented `statusLine` JSON can update the same snapshot after assistant responses if you choose to configure it. Periodic API reads come only from the `claude-subscription-fetch.timer` systemd user timer (every 10 minutes, see `systemctl --user list-timers`); the widget reads the stored snapshot. The widget does not need the status-line integration for live API reads.
 
@@ -51,7 +51,7 @@ The status line integration is optional for live API reads. If configured, it ad
 - `manifest.json` — plugin registration
 - `BarWidget.qml` / `UsagePanel.qml` — bar button and popup
 - `statusline.py` — optional local fallback from Claude Code's documented status-line JSON
-- `fetch.py` — fetch, validate, persist, and return a local usage snapshot (`--cached` reads the snapshot without network)
+- `fetch.py` — read the local usage snapshot (default, no network); `--live` refreshes it from the API; `--service` is the timer's mode (logs to the journal, exits non-zero on failure)
 - `install-timer.sh` — install/remove the 10-minute background refresh timer
 
 Privacy: the cache contains only usage percentages, reset epochs, and an update timestamp. Each refresh makes one HTTPS request to Anthropic's undocumented OAuth usage endpoint. The status-line fallback performs no network requests.

@@ -5,8 +5,10 @@ The OAuth usage endpoint is used by Claude Code itself but is not a public,
 documented Anthropic API. Keep the request isolated here and store only the
 aggregate percentages, reset times, and fetch timestamp.
 """
+import contextlib
 import datetime
 import email.utils
+import fcntl
 import json
 import math
 import os
@@ -28,14 +30,20 @@ MAX_CACHE_BYTES = 4096
 MAX_CREDENTIAL_BYTES = 64 * 1024
 TIMEOUT_SECONDS = 10
 MIN_REQUEST_INTERVAL = 300
+# Usage can exceed 100% when over the limit; the UI clamps for display.
+MAX_PERCENTAGE = 1000.0
 # The background timer refreshes every 10 minutes; older snapshots are stale.
 STALE_AFTER = 1500
 
 
 class UsageError(RuntimeError):
-    def __init__(self, message, retry_after=None):
+    """A refresh that was refused or skipped; the cached snapshot is still served."""
+
+    def __init__(self, message, retry_after=None, rate_limited=False, skipped=False):
         super().__init__(message)
         self.retry_after = retry_after
+        self.rate_limited = rate_limited
+        self.skipped = skipped
 
 
 class NoRedirectHandler(HTTPRedirectHandler):
@@ -56,6 +64,19 @@ def cooldown_path():
     return cache_path().with_name("usage-cooldown.json")
 
 
+@contextlib.contextmanager
+def state_lock():
+    """Serialize cooldown and snapshot updates across processes (timer, widget, status line)."""
+    path = cache_path().with_name("usage.lock")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def credentials_path():
     override = os.environ.get("CLAUDE_SUBSCRIPTION_CREDENTIALS", "").strip()
     if override:
@@ -71,7 +92,7 @@ def safe_percentage(value):
         number = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
-    if not math.isfinite(number) or number < 0 or number > 100:
+    if not math.isfinite(number) or number < 0 or number > MAX_PERCENTAGE:
         return None
     return round(number, 2)
 
@@ -137,6 +158,9 @@ def read_credentials():
     token = oauth.get("accessToken") if isinstance(oauth, dict) else None
     if not isinstance(token, str) or not token or len(token) > 8192:
         raise RuntimeError("Claude Code OAuth credentials do not contain an access token.")
+    expires_at = safe_timestamp(oauth.get("expiresAt"))
+    if expires_at and expires_at <= time.time():
+        raise RuntimeError("Claude sign-in has expired. Open Claude Code to renew it; refreshes resume after that.")
     scopes = oauth.get("scopes") if isinstance(oauth, dict) else None
     if isinstance(scopes, list) and scopes and "user:profile" not in scopes:
         raise RuntimeError("The saved Claude Code sign-in does not include usage access. Sign in again with Claude Code.")
@@ -173,7 +197,7 @@ def request_usage(token):
             raise UsageError("Claude sign-in expired or does not allow usage access. Open Claude Code and refresh your sign-in.") from None
         if exc.code == 429:
             retry_after = parse_retry_after(exc.headers.get("Retry-After") if exc.headers else None)
-            raise UsageError("Claude usage API rate-limited this refresh. Wait before retrying.", retry_after) from None
+            raise UsageError("Claude usage API rate-limited this refresh. Wait before retrying.", retry_after, rate_limited=True) from None
         raise RuntimeError("Claude usage API returned HTTP " + str(exc.code) + ".") from None
     except (URLError, TimeoutError, OSError):
         raise RuntimeError("Could not reach the Claude usage API. The last saved snapshot is shown if available.") from None
@@ -271,8 +295,9 @@ def clear_cooldown():
             pass
 
 
-def normalize_usage(payload):
-    snapshot = {"updated_at": int(time.time())}
+def normalize_usage(payload, requested_at=None):
+    # Stamp with the request start so a concurrent newer write is not overwritten.
+    snapshot = {"updated_at": int(requested_at or time.time())}
     for source, target in (("five_hour", "five_hour"), ("seven_day", "seven_day")):
         item = payload.get(source)
         if not isinstance(item, dict):
@@ -305,6 +330,15 @@ def save_cache(snapshot):
             os.unlink(temp_name)
         except FileNotFoundError:
             pass
+
+
+def save_cache_if_newer(snapshot):
+    """Replace the snapshot unless the stored one is newer. Call with state_lock held."""
+    existing = read_cache()
+    if existing and (existing.get("updated_at") or 0) > snapshot["updated_at"]:
+        return False
+    save_cache(snapshot)
+    return True
 
 
 def read_cache():
@@ -363,56 +397,72 @@ def cached_result():
     return result
 
 
-def main():
-    if "--cached" in sys.argv[1:]:
-        print(json.dumps(cached_result(), separators=(",", ":")))
-        return
+def reserve_request(now):
+    """Atomically check the rate limit and record an attempt."""
+    with state_lock():
+        cooldown = read_cooldown()
+        if cooldown and cooldown["retry_after_at"] and cooldown["retry_after_at"] > now:
+            remaining = max(1, (cooldown["retry_after_at"] - now + 59) // 60)
+            raise UsageError("Claude usage API is cooling down after rate limiting. Try again in about "
+                             + str(remaining) + " min.", skipped=True)
+        if cooldown and cooldown["last_attempt_at"] and now - cooldown["last_attempt_at"] < MIN_REQUEST_INTERVAL:
+            remaining = max(1, (MIN_REQUEST_INTERVAL - (now - cooldown["last_attempt_at"]) + 59) // 60)
+            raise UsageError("Claude usage was checked recently. Try again in about "
+                             + str(remaining) + " min.", skipped=True)
+        mark_request_attempt()
+
+
+def live_refresh():
+    """Fetch from the API. Returns (result, failed) where failed is an error message or None."""
     credentials = None
     try:
         credentials, token = read_credentials()
-        cooldown = read_cooldown()
         now = int(time.time())
-        if cooldown and cooldown["retry_after_at"] and cooldown["retry_after_at"] > now:
-            remaining = max(1, (cooldown["retry_after_at"] - now + 59) // 60)
-            raise UsageError("Claude usage API is cooling down after rate limiting. Try again in about " + str(remaining) + " min.")
-        if cooldown and cooldown["last_attempt_at"] and now - cooldown["last_attempt_at"] < MIN_REQUEST_INTERVAL:
-            remaining = max(1, (MIN_REQUEST_INTERVAL - (now - cooldown["last_attempt_at"]) + 59) // 60)
-            cached = read_cache()
-            if cached and not is_stale(cached, now):
-                print(json.dumps({"plan": subscription_type(credentials), **cached, "stale": False}, separators=(",", ":")))
-                return
-            raise UsageError("Claude usage was checked recently. Try again in about " + str(remaining) + " min.")
-        mark_request_attempt()
-        snapshot = normalize_usage(request_usage(token))
-        save_cache(snapshot)
-        clear_cooldown()
-        result = {"plan": subscription_type(credentials), **snapshot, "stale": False}
+        reserve_request(now)
+        snapshot = normalize_usage(request_usage(token), now)
+        with state_lock():
+            save_cache_if_newer(snapshot)
+            clear_cooldown()
+        cached = read_cache() or snapshot
+        return {"plan": subscription_type(credentials), **cached, "stale": False}, None
     except UsageError as exc:
-        if exc.retry_after is not None:
+        if exc.rate_limited:
             try:
-                write_cooldown(exc.retry_after)
+                with state_lock():
+                    write_cooldown(exc.retry_after)
             except OSError:
                 pass
-        cached = read_cache()
-        if cached:
-            result = {"plan": subscription_type(credentials), **cached, "stale": True, "error": str(exc)}
-        else:
-            result = {"error": str(exc)}
+        message, failed = str(exc), (None if exc.skipped else str(exc))
     except RuntimeError as exc:
-        cached = read_cache()
-        if cached:
-            result = {"plan": subscription_type(credentials), **cached, "stale": True, "error": str(exc)}
-        else:
-            result = {"error": str(exc)}
+        message = failed = str(exc)
     except Exception:
-        cached = read_cache()
-        message = "Could not update Claude usage. The last saved snapshot is shown if available."
-        if cached:
-            result = {"plan": subscription_type(credentials), **cached, "stale": True, "error": message}
-        else:
-            result = {"error": message}
+        message = failed = "Could not update Claude usage. The last saved snapshot is shown if available."
+    cached = read_cache()
+    if not cached:
+        return {"error": message}, failed
+    stale = failed is not None or is_stale(cached)
+    result = {"plan": subscription_type(credentials), **cached, "stale": stale}
+    if stale:
+        result["error"] = message
+    return result, failed
+
+
+def main(argv=None):
+    """No flags: read the local snapshot (no network). --live: refresh from the API.
+    --service: like --live, for the systemd timer; logs a line and exits 1 on failure."""
+    args = set(sys.argv[1:] if argv is None else argv)
+    if "--service" in args:
+        result, failed = live_refresh()
+        if failed:
+            print("claude-subscription refresh failed: " + failed, file=sys.stderr)
+            return 1
+        note = result.get("error") or "snapshot updated"
+        print("claude-subscription: " + note)
+        return 0
+    result = live_refresh()[0] if "--live" in args else cached_result()
     print(json.dumps(result, separators=(",", ":")))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -25,8 +25,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 -I "$script"
-StandardOutput=null
+ExecStart=/usr/bin/python3 -I "$script" --service
 Nice=10
 EOF
 

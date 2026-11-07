@@ -21,6 +21,7 @@ Panel {
   property var fiveHour: null
   property var sevenDay: null
   property bool loading: false
+  property bool pendingLive: false
   property bool popoutSwitchClosing: false
   property double clockTick: Date.now()
   readonly property int maxPanelHeight: popup.screen ? Math.max(Style.space(280), popup.screen.height - Style.gapsOut * 4) : Style.space(560)
@@ -30,11 +31,15 @@ Panel {
   // Background polling is done by the claude-subscription-fetch systemd timer;
   // the panel reads its local snapshot. Only an explicit refresh hits the API.
   function runFetch(live) {
-    if (loading) return
+    if (loading) {
+      // Don't drop a manual refresh that arrives during a cached read.
+      if (live) pendingLive = true
+      return
+    }
     loading = true
     errorText = ""
     var script = Qt.resolvedUrl("fetch.py").toString().replace("file://", "")
-    fetchProc.command = live ? ["python3", script] : ["python3", script, "--cached"]
+    fetchProc.command = live ? ["python3", script, "--live"] : ["python3", script]
     fetchProc.running = true
   }
   function reload() { runFetch(false) }
@@ -98,6 +103,10 @@ Panel {
       if (exitCode !== 0 && root.errorText === "") root.errorText = "Could not read Claude Code usage (exit " + exitCode + ")"
       if (root.errorText !== "" && root.fiveHour === null && root.sevenDay === null)
         root.statusText = root.errorText
+      if (root.pendingLive) {
+        root.pendingLive = false
+        Qt.callLater(root.refresh)
+      }
     }
   }
 

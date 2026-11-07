@@ -2,12 +2,12 @@
 """Persist Claude Code's documented statusline rate-limit snapshot locally."""
 import json
 import math
-import os
-import stat
 import sys
-import tempfile
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fetch  # noqa: E402
 
 MAX_INPUT = 16 * 1024
 MAX_PERCENTAGE = 1000.0
@@ -35,10 +35,6 @@ def safe_timestamp(value):
     if stamp < 0 or stamp > 4_102_444_800:  # 2100-01-01 UTC
         return None
     return stamp
-
-
-def cache_path():
-    return Path.home() / ".local/state/claude-subscription/usage.json"
 
 
 def main():
@@ -71,24 +67,10 @@ def main():
     if not shown:
         return
 
-    path = cache_path()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
-    fd, temp_name = tempfile.mkstemp(prefix=".usage-", dir=path.parent)
-    try:
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump(snapshot, out, separators=(",", ":"))
-            out.write("\n")
-        os.replace(temp_name, path)
-    finally:
-        try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
+    # Share fetch.py's lock and newer-wins rule so an in-flight API refresh
+    # and this write cannot clobber each other.
+    with fetch.state_lock():
+        fetch.save_cache_if_newer(snapshot)
 
     print("Claude · " + " · ".join(shown))
 
