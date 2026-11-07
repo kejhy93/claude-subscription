@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "claude.subscription",
+  "name": "Claude Subscription",
+  "version": "1.0.0",
+  "author": "Local",
+  "license": "MIT",
+  "description": "Claude Code Pro/Max subscription rate-limit usage.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Claude Subscription",
+    "description": "Latest Claude Code 5-hour and weekly subscription usage.",
+    "category": "AI",
+    "aliases": ["claude", "subscription", "usage"],
+    "allowMultiple": false
+  }
+}
